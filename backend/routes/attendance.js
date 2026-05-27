@@ -1,60 +1,117 @@
 const express = require('express');
 const router = express.Router();
 
-
 module.exports = (db) => {
-    
-    //  CHECK-IN ROUTE
+
+    // Checked-In Processing Pipeline (Evaluates threshold bounds)
     router.post('/check-in', async (req, res) => {
         const { userId } = req.body;
-        const today = new Date().toISOString().split('T')[0]; // Gets YYYY-MM-DD
-        const now = new Date().toTimeString().split(' ')[0];  // Gets HH:MM:SS
+        const today = new Date().toISOString().split('T')[0];
+        
+        const now = new Date();
+        const checkInTimeStr = now.toTimeString().split(' ')[0];
+        const hours = now.getHours();
+        const minutes = now.getMinutes();
 
         try {
-            // 1. Check if the user already checked in today
-            const [existing] = await db.query(
-                'SELECT * FROM attendance WHERE user_id = ? AND date = ?', 
-                [userId, today]
-            );
-
+            const [existing] = await db.query('SELECT * FROM attendance WHERE user_id = ? AND date = ?', [userId, today]);
             if (existing.length > 0) {
-                return res.status(400).json({ message: "User already checked in today." });
+                return res.status(400).json({ status: 'error', message: 'Employee configuration already verified for today.' });
             }
 
-            // 2. Insert new check-in record
+            // Calculation Logic: Present (< 10:30), Late (< 12:30), Half-Day (After)
+            let finalStatus = 'Present';
+            if (hours > 12 || (hours === 12 && minutes > 30)) {
+                finalStatus = 'Half-Day';
+            } else if (hours > 10 || (hours === 10 && minutes > 30)) {
+                finalStatus = 'Late';
+            }
+
             await db.query(
-                'INSERT INTO attendance (user_id, date, check_in) VALUES (?, ?, ?)',
-                [userId, today, now]
+                'INSERT INTO attendance (user_id, date, check_in, status) VALUES (?, ?, ?, ?)',
+                [userId, today, checkInTimeStr, finalStatus]
             );
 
-            res.status(201).json({ message: "Check-in successful!", time: now });
+            res.status(201).json({ status: 'success', message: 'Clock sequence registered.', statusAssigned: finalStatus, time: checkInTimeStr });
         } catch (error) {
             console.error(error);
-            res.status(500).json({ message: "Server error during check-in." });
+            res.status(500).json({ status: 'error', message: 'Server processing failure during clock ingestion.' });
         }
     });
 
-    //  CHECK-OUT ROUTE
+    // Checkout Pipeline Execution
     router.put('/check-out', async (req, res) => {
         const { userId } = req.body;
         const today = new Date().toISOString().split('T')[0];
-        const now = new Date().toTimeString().split(' ')[0];
+        const checkOutTimeStr = new Date().toTimeString().split(' ')[0];
 
         try {
-            // 1. Update the record for today by adding the check_out time
             const [result] = await db.query(
                 'UPDATE attendance SET check_out = ? WHERE user_id = ? AND date = ? AND check_out IS NULL',
-                [now, userId, today]
+                [checkOutTimeStr, userId, today]
             );
 
             if (result.affectedRows === 0) {
-                return res.status(400).json({ message: "No active check-in found for today, or already checked out." });
+                return res.status(400).json({ status: 'error', message: 'Active shift record missing or terminal state already met.' });
             }
 
-            res.status(200).json({ message: "Check-out successful!", time: now });
+            res.status(200).json({ status: 'success', message: 'Clock-out event stored successfully.', time: checkOutTimeStr });
         } catch (error) {
             console.error(error);
-            res.status(500).json({ message: "Server error during check-out." });
+            res.status(500).json({ status: 'error', message: 'Server tracking calculation fault.' });
+        }
+    });
+
+    // Get Personal Metrics (Isolate for Employees, or broad for Admins)
+    router.get('/metrics/:userId', async (req, res) => {
+        const { userId } = req.params;
+        const currentYearMonth = new Date().toISOString().slice(0, 7); // Format: YYYY-MM
+
+        try {
+            // Fetch baseline profiling parameters (holiday credits metrics)
+            const [userRecords] = await db.query('SELECT name, email, role, holidays_remaining FROM users WHERE id = ?', [userId]);
+            if (userRecords.length === 0) {
+                return res.status(404).json({ status: 'error', message: 'Target user profile profile missing.' });
+            }
+
+            // Total monthly attendance metric calculations
+            const [monthlyAttendance] = await db.query(
+                'SELECT COUNT(*) as totalPresent FROM attendance WHERE user_id = ? AND date LIKE ?',
+                [userId, `${currentYearMonth}%`]
+            );
+
+            res.status(200).json({
+                status: 'success',
+                userData: userRecords[0],
+                metrics: {
+                    currentMonthTarget: currentYearMonth,
+                    totalAttendanceThisMonth: monthlyAttendance[0].totalPresent,
+                    yearlyHolidaysRemaining: userRecords[0].holidays_remaining,
+                    maxMonthlyLeaveCap: 5
+                }
+            });
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ status: 'error', message: 'Database fetch anomaly tracking records.' });
+        }
+    });
+
+    // Admin Dashboard View: Live Checked-In Entities Data Fetch
+    router.get('/admin/live-status', async (req, res) => {
+        const today = new Date().toISOString().split('T')[0];
+
+        try {
+            const [liveUsers] = await db.query(
+                `SELECT u.id, u.name, u.email, a.check_in, a.status 
+                 FROM attendance a 
+                 JOIN users u ON a.user_id = u.id 
+                 WHERE a.date = ? AND a.check_out IS NULL`,
+                [today]
+            );
+            res.status(200).json({ status: 'success', activeEmployeesCount: liveUsers.length, activeEmployees: liveUsers });
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ status: 'error', message: 'Admin data gathering extraction failed.' });
         }
     });
 
