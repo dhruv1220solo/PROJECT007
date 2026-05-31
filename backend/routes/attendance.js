@@ -3,7 +3,7 @@ const router = express.Router();
 
 module.exports = (db) => {
 
-    // Checked-In Processing Pipeline (Evaluates threshold bounds)
+    // 1. Checked-In Processing Pipeline (Evaluates threshold bounds: Present, Late, Half-Day)
     router.post('/check-in', async (req, res) => {
         const { userId } = req.body;
         const today = new Date().toISOString().split('T')[0];
@@ -39,7 +39,7 @@ module.exports = (db) => {
         }
     });
 
-    // Checkout Pipeline Execution
+    // 2. Checkout Pipeline Execution
     router.put('/check-out', async (req, res) => {
         const { userId } = req.body;
         const today = new Date().toISOString().split('T')[0];
@@ -62,7 +62,7 @@ module.exports = (db) => {
         }
     });
 
-    // Get Personal Metrics (Isolate for Employees, or broad for Admins)
+    // 3. Get Personal Metrics (Isolate for Employees, or broad for Admins)
     router.get('/metrics/:userId', async (req, res) => {
         const { userId } = req.params;
         const currentYearMonth = new Date().toISOString().slice(0, 7); // Format: YYYY-MM
@@ -96,7 +96,7 @@ module.exports = (db) => {
         }
     });
 
-    // Admin Dashboard View: Live Checked-In Entities Data Fetch
+    // 4. Admin Dashboard View: Live Checked-In Entities Data Fetch
     router.get('/admin/live-status', async (req, res) => {
         const today = new Date().toISOString().split('T')[0];
 
@@ -115,5 +115,111 @@ module.exports = (db) => {
         }
     });
 
+    // 5. Fetch Historical Attendance Logs for the Dashboard Table (Dynamically calculates hours)
+    router.get('/history/:userId', async (req, res) => {
+        const { userId } = req.params;
+
+        try {
+            // We use DATE_FORMAT to make the date look clean, and TIMEDIFF to calculate hours worked on the fly
+            const [logs] = await db.query(
+                `SELECT 
+                    DATE_FORMAT(date, '%Y-%m-%d') as date, 
+                    check_in, 
+                    check_out, 
+                    status,
+                    ROUND(TIME_TO_SEC(TIMEDIFF(check_out, check_in)) / 3600, 2) as total_hours
+                 FROM attendance 
+                 WHERE user_id = ? 
+                 ORDER BY date DESC LIMIT 10`,
+                [userId]
+            );
+            
+            res.status(200).json({ status: 'success', logs });
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ status: 'error', message: 'Failed to fetch historical tracking records.' });
+        }
+    });
+// ADMIN: Fetch Global Attendance Logs
+    router.get('/admin/all-logs', async (req, res) => {
+        try {
+            const [logs] = await db.query(
+                `SELECT a.date, a.check_in, a.check_out, a.status, u.name as employeeName, u.id as user_id 
+                 FROM attendance a 
+                 JOIN users u ON a.user_id = u.id 
+                 ORDER BY a.date DESC, a.check_in DESC LIMIT 50`
+            );
+            res.status(200).json({ status: 'success', logs });
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ status: 'error', message: 'Failed to fetch global logs.' });
+        }
+    });
+
+    // EMPLOYEE: Submit a Leave Request
+    router.post('/leaves/request', async (req, res) => {
+        const { userId, startDate, endDate, reason } = req.body;
+        try {
+            await db.query(
+                'INSERT INTO leave_requests (user_id, start_date, end_date, reason) VALUES (?, ?, ?, ?)',
+                [userId, startDate, endDate, reason]
+            );
+            res.status(201).json({ status: 'success', message: 'Leave request submitted successfully.' });
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ status: 'error', message: 'Failed to submit leave request.' });
+        }
+    });
+
+    // EMPLOYEE: Get Personal Leave History
+    router.get('/leaves/:userId', async (req, res) => {
+        const { userId } = req.params;
+        try {
+            const [leaves] = await db.query(
+                `SELECT DATE_FORMAT(start_date, '%Y-%m-%d') as start_date, 
+                        DATE_FORMAT(end_date, '%Y-%m-%d') as end_date, 
+                        reason, status 
+                 FROM leave_requests WHERE user_id = ? ORDER BY created_at DESC`,
+                [userId]
+            );
+            res.status(200).json({ status: 'success', leaves });
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ status: 'error', message: 'Failed to fetch leave history.' });
+        }
+    });
+    // ADMIN: Fetch all company leave requests
+    router.get('/admin/leaves', async (req, res) => {
+        try {
+            const [leaves] = await db.query(
+                `SELECT l.id, u.name as employeeName, 
+                        DATE_FORMAT(l.start_date, '%Y-%m-%d') as start_date, 
+                        DATE_FORMAT(l.end_date, '%Y-%m-%d') as end_date, 
+                        l.reason, l.status 
+                 FROM leave_requests l 
+                 JOIN users u ON l.user_id = u.id 
+                 ORDER BY l.created_at DESC`
+            );
+            res.status(200).json({ status: 'success', leaves });
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ status: 'error', message: 'Failed to fetch company leave requests.' });
+        }
+    });
+
+    // ADMIN: Process a leave request (Approve/Reject)
+    router.put('/admin/leaves/:id', async (req, res) => {
+        const { id } = req.params;
+        const { status } = req.body; // 'Approved' or 'Rejected'
+        
+        try {
+            await db.query('UPDATE leave_requests SET status = ? WHERE id = ?', [status, id]);
+            res.status(200).json({ status: 'success', message: `Leave request ${status.toLowerCase()} successfully.` });
+        } catch (error) {
+            console.error(error);
+            res.status(500).json({ status: 'error', message: 'Failed to process leave request.' });
+        }
+    });
+    
     return router;
 };

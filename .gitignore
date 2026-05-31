@@ -52,3 +52,4 @@ Thumbs.db
 
 # Misc
 npm-debug.log
+frontend/.env
